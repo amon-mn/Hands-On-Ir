@@ -82,7 +82,7 @@ Clone o repositório:
 git clone https://github.com/amon-mn/Hands-On-Ir.git
 ```
 
-Ferramenta de Gestão: acompanhe o nosso progresso no **[Github Projects](https://github.com/amon-mn/Hands-On-Ir/projects/3)**.
+Ferramenta de Gestão: acompanhe o nosso progresso no **[Github Projects](https://github.com/users/amon-mn/projects/3)**.
 
 ---
 
@@ -103,4 +103,5 @@ Ferramenta de Gestão: acompanhe o nosso progresso no **[Github Projects](https:
 As instruções detalhadas de como compilar e instalar cada componente serão adicionadas aqui nas próximas sprints.  
 
 ➡️ **A Sprint 0 está focada no planejamento e na configuração.**
+
 
