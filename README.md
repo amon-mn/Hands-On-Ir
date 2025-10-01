@@ -48,16 +48,18 @@ A meta é permitir que um aplicativo Android padrão envie comandos de infraverm
 
 ## Arquitetura do Sistema
 ```bash
-+----------------+      +-------------------+      +-------------+
-|    Android     | <--> |        HAL        | <--> |   Kernel    |
-|  Framework     |      |   (ConsumerIrHal) |      |   Driver    |
-| (App, Service) |      |                   |      |   (sysfs)   |
-+----------------+      +-------------------+      +-------------+
-        |
-        | Comunicação USB-Serial
-        v
++----------------+       +-------------------+       +-------------+
+|    Android     |       |       HAL         |       |    Kernel   |
+|    Framework   | <---> | (ConsumerIrHal)   | <---> |   Driver    |
+| (App, Service) |       |                   |       | (sysfs)     |
++----------------+       +-------------------+       +-------------+
+                                                             |
+                 +-------------------------------------------+
+                 |
+                 |  Comunicação USB-Serial
+                 v
 +-------------------------+
-|        Hardware         |
+|    Hardware & Firmware  |
 |   (ESP32 + LED IR)      |
 +-------------------------+
 ```
@@ -103,6 +105,7 @@ Ferramenta de Gestão: acompanhe o nosso progresso no **[Github Projects](https:
 As instruções detalhadas de como compilar e instalar cada componente serão adicionadas aqui nas próximas sprints.  
 
 ➡️ **A Sprint 0 está focada no planejamento e na configuração.**
+
 
 
 
