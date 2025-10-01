@@ -11,7 +11,7 @@ O principal desafio é estabelecer uma comunicação eficiente entre um protóti
 - [Equipe](#equipe)
 - [Visão Geral do Projeto](#visão-geral-do-projeto)
 - [Arquitetura do Sistema](#arquitetura-do-sistema)
-- [Divisão de Tarefas (Roles)](#divisão-de-tarefas-roles)
+- [Divisão de Tarefas](#divisão-de-tarefas-roles)
 - [Pré-requisitos e Setup](#pré-requisitos-e-setup)
 - [Instruções de Instalação e Uso](#instruções-de-instalação-e-uso)
 - [Roadmap e Progresso](#roadmap-e-progresso)
@@ -103,5 +103,6 @@ Ferramenta de Gestão: acompanhe o nosso progresso no **[Github Projects](https:
 As instruções detalhadas de como compilar e instalar cada componente serão adicionadas aqui nas próximas sprints.  
 
 ➡️ **A Sprint 0 está focada no planejamento e na configuração.**
+
 
 
