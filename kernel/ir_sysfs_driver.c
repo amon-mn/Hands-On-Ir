@@ -26,6 +26,7 @@ static ssize_t attr_show(struct kobject *sys_obj, struct kobj_attribute *attr, c
 static ssize_t attr_store(struct kobject *sys_obj, struct kobj_attribute *attr, const char *buff, size_t count); // Escrita no sysfs
 
 // Variáveis de estado
+static char recv_line[MAX_RECV_LINE];
 static struct usb_device *ir_device;        
 static uint usb_in, usb_out;                       
 static char *usb_in_buffer, *usb_out_buffer;       
@@ -37,6 +38,7 @@ static struct kobj_attribute  transmit_attribute = __ATTR(transmit, S_IRUGO | S_
 static struct attribute      *attrs[]       = { &transmit_attribute.attr, NULL };
 static struct attribute_group attr_group    = { .attrs = attrs };
 static struct kobject        *sys_obj;
+
 
 // =========================================================
 // REGISTRO (PROBE/DISCONNECT)
@@ -95,6 +97,7 @@ static int usb_send_cmd_ir(char *full_command) {
     int ret, actual_size, i;
     int retries = 50;                        // Aumentado retries para dar tempo de resposta do firmware
     char resp_expected[] = "[OK] TX";        // Resposta esperada: [OK] TX
+    
     
     // Constrói o comando no formato que o firmware espera: TX <dados>\n
     // Assumimos que 'full_command' já está no formato '<freq> <us,...>'
