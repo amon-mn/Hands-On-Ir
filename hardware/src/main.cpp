@@ -1,44 +1,40 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <IRremote.hpp>
-#include <ctype.h>      // isspace, isxdigit
-#include <string.h>     // strtok, strlen
+#include <ctype.h>
+#include <string.h>
 
-// ====== Hardware & Display ======
-#define IR_SEND_PIN     4
-#define SCREEN_WIDTH    128
-#define SCREEN_HEIGHT   32
-#define OLED_ADDR       0x3C
+// FreeRTOS (ESP32)
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
-#define UART            Serial
-#define BAUD            115200
+#include "OledUI.hpp"
 
-// ====== Limites de segurança ======
-static const uint32_t MAX_XMIT_TIME_US   = 2000000UL;  // 2 s
-static const uint16_t MAX_PATTERN_COUNT  = 256;
+// ======================= Hardware =======================
+#define IR_SEND_PIN   4
+#define IR_RECV_PIN   15
+#define UART          Serial
+#define BAUD          115200
+#define OLED_ADDR     0x3C
 
-// ====== Estado / buffers ======
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
-static char asciiBuf[256];
+// =================== Limites de segurança =================
+static const uint32_t MAX_XMIT_TIME_US   = 3000000UL;  // 3 s (AC pode ser longo)
+static const uint16_t MAX_PATTERN_COUNT  = 1024;       // suporta padrões grandes
+
+// =================== Estado / buffers ====================
+static char asciiBuf[4096];                 // linha do terminal (grande)
 static uint16_t asciiLen = 0;
-static uint16_t packetCount = 0;
-static uint32_t lastFreqHz = 38000;
+static volatile uint16_t packetCount = 0;
+static volatile uint32_t lastFreqHz = 38000;
 
-// ====== Helpers ======
-static inline void show3(const String& l1, const String& l2 = "", const String& l3 = "") {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);  display.println(l1);   // 0..31 é o range válido
-  display.setCursor(0, 12); display.println(l2);   // 12 px
-  display.setCursor(0, 24); display.println(l3);   // 24 px (última linha)
-  display.setCursor(100, 24);                      // cabe no 128×32
-  display.print("#"); display.print(packetCount);
-  display.display();
-}
+// =================== Display & sync ======================
+static OledUI oled;
+static SemaphoreHandle_t dispMutex;
+static String lastTxShort = "-";
+static String lastRxShort = "-";
 
+// ================ Helpers gerais =========================
 static inline void trim(char* s) {
   int n = strlen(s);
   while (n > 0 && (s[n-1] == '\r' || s[n-1] == '\n' || isspace((unsigned char)s[n-1]))) s[--n] = 0;
@@ -54,12 +50,25 @@ static inline bool isHexStr(const char* s, int expectLen) {
 
 static void help() {
   UART.println(F("IR ASCII cmds:"));
-  UART.println(F("  NEC <HEX8>                  e.g. NEC 20DF10EF"));
-  UART.println(F("  TX <freqHz> <us,...>        e.g. TX 38000 9000,4500,560,560,560,560"));
-  UART.println(F("  RAW <b b b>                 e.g. RAW 10 20 30 40  (each * 50us)"));
+  UART.println(F("  NEC <HEX8>"));
+  UART.println(F("  TX  <freqHz> <us,us,...>"));
+  UART.println(F("  TXM <freqHz>  (entao envie linhas com <us,us,...> e finalize com END)"));
+  UART.println(F("  RAW <b b b>   (cada b vira 50us)"));
 }
 
-// ====== Execução dos comandos ======
+// Atualiza display com "TX: ..." e "RX: ..."
+static void showStatus(const String& txLine, const String& rxLine) {
+  if (!oled.isReady()) return;
+  String l1 = "IR ASCII v1.1";
+  String l2 = "TX: " + txLine;
+  String l3 = "RX: " + rxLine;
+  if (dispMutex && xSemaphoreTake(dispMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    oled.show3(l1, l2, l3, packetCount);
+    xSemaphoreGive(dispMutex);
+  }
+}
+
+// ================= Execução de comandos (TX) ==============
 static void doNEC(const char* hex8) {
   if (!isHexStr(hex8, 8)) { UART.println(F("[ERR] use: NEC 20DF10EF")); return; }
   uint8_t raw[4];
@@ -68,10 +77,41 @@ static void doNEC(const char* hex8) {
     raw[i] = (uint8_t) strtoul(tmp, nullptr, 16);
   }
   uint32_t code = (uint32_t(raw[0])<<24)|(uint32_t(raw[1])<<16)|(uint32_t(raw[2])<<8)|raw[3];
-  IrSender.sendNECMSB(code, 32);   // API nova (MSB)
+
+  IrSender.sendNECMSB(code, 32);
   packetCount++;
-  show3("NEC", String(hex8), "enviado");
+
+  lastTxShort = String("NEC ") + hex8;
   UART.printf("[OK] NEC 0x%s\n", hex8);
+  showStatus(lastTxShort, lastRxShort);
+}
+
+static bool sendRawUs(uint32_t freqHz, const uint16_t* raw, uint16_t count) {
+  if (count == 0) { UART.println(F("[ERR] pattern vazio")); return false; }
+
+  uint32_t totalUs = 0;
+  for (uint16_t i = 0; i < count; ++i) totalUs += raw[i];
+  if (totalUs > MAX_XMIT_TIME_US) {
+    UART.printf("[ERR] pattern muito longo: %lu us > limite %lu us\n",
+                (unsigned long)totalUs, (unsigned long)MAX_XMIT_TIME_US);
+    return false;
+  }
+
+  uint8_t kHz = (uint8_t)((freqHz + 500) / 1000);
+  if (kHz == 0) kHz = 1; if (kHz > 255) kHz = 255;
+
+  IrSender.enableIROut(kHz);
+  IrSender.sendRaw(raw, count, kHz);
+  lastFreqHz = freqHz;
+  packetCount++;
+
+  char shortF[20]; snprintf(shortF, sizeof(shortF), "%luHz", (unsigned long)freqHz);
+  char shortN[20]; snprintf(shortN, sizeof(shortN), "n=%u", count);
+  lastTxShort = String(shortF) + " " + shortN;
+
+  UART.printf("[OK] TX f=%lu Hz, n=%u\n", (unsigned long)freqHz, count);
+  showStatus(lastTxShort, lastRxShort);
+  return true;
 }
 
 static void doTX(char* freqStr, char* listStr) {
@@ -81,124 +121,242 @@ static void doTX(char* freqStr, char* listStr) {
 
   static uint16_t raw[MAX_PATTERN_COUNT];
   uint16_t count = 0;
-  uint32_t totalUs = 0;
 
-  // Parse "9000,4500,560,560,..."
   for (char* tok = strtok(listStr, ","); tok && count < MAX_PATTERN_COUNT; tok = strtok(nullptr, ",")) {
     while (*tok && isspace((unsigned char)*tok)) tok++;
     uint32_t us = strtoul(tok, nullptr, 10);
     if (us == 0) { UART.println(F("[ERR] duracao <= 0")); return; }
     raw[count++] = (uint16_t) us;
-    totalUs += us;
   }
-  if (count == 0) { UART.println(F("[ERR] pattern vazio")); return; }
-  if (totalUs > MAX_XMIT_TIME_US) { UART.println(F("[ERR] pattern muito longo")); return; }
+  if (count >= MAX_PATTERN_COUNT && strtok(nullptr, ",")) {
+    UART.println(F("[WARN] parte do pattern foi truncada (MAX_PATTERN_COUNT)"));
+  }
 
-  uint8_t kHz = (uint8_t)((freqHz + 500) / 1000);
-  if (kHz == 0) kHz = 1; if (kHz > 255) kHz = 255;
-
-  IrSender.enableIROut(kHz);
-  IrSender.sendRaw(raw, count, kHz);
-
-  lastFreqHz = freqHz;
-  packetCount++;
-
-  char fbuf[28]; snprintf(fbuf, sizeof(fbuf), "f=%lu Hz", (unsigned long)freqHz);
-  char cbuf[28]; snprintf(cbuf, sizeof(cbuf), "n=%u slices", count);
-  show3("TRANSMIT", fbuf, cbuf);
-  UART.printf("[OK] TX f=%lu Hz, n=%u\n", (unsigned long)freqHz, count);
+  (void)sendRawUs(freqHz, raw, count);
 }
 
 static void doRAW(int argc, char** argv) {
-  // RAW 10 20 30 40  (cada valor vira 50us)
   if (argc <= 1) { UART.println(F("[ERR] use: RAW <b b b>")); return; }
   static uint16_t raw[MAX_PATTERN_COUNT];
-  uint16_t n = 0; uint32_t totalUs = 0;
+  uint16_t n = 0;
 
   for (int i = 1; i < argc && n < MAX_PATTERN_COUNT; i++) {
-    // aceita decimal ou hex (0x.. ou sem 0x)
     uint32_t v = 0;
     if (strncasecmp(argv[i], "0x", 2) == 0) v = strtoul(argv[i] + 2, nullptr, 16);
     else v = strtoul(argv[i], nullptr, 0);
     if (v > 255) v = 255;
     raw[n++] = (uint16_t)(v * 50);
-    totalUs += raw[n-1];
   }
-
   if (n == 0) { UART.println(F("[ERR] RAW vazio")); return; }
-  if (totalUs > MAX_XMIT_TIME_US) { UART.println(F("[ERR] pattern muito longo")); return; }
 
   uint8_t kHz = (uint8_t)((lastFreqHz + 500) / 1000);
   if (kHz == 0) kHz = 38;
-  IrSender.sendRaw(raw, n, kHz);
-
-  packetCount++;
-  show3("RAW(antigo)", String("n=") + n, "enviado");
-  UART.printf("[OK] RAW n=%u\n", n);
+  sendRawUs(kHz * 1000UL, raw, n);
 }
 
-// ====== Parser de linha ASCII ======
+// ========== TXM (multi-linha): estado de montagem =========
+struct TXMState {
+  bool assembling = false;
+  uint32_t freqHz = 38000;
+  uint16_t count = 0;
+  uint16_t raw[MAX_PATTERN_COUNT];
+} static txm;
+
+static void txmReset() { txm.assembling = false; txm.freqHz = 38000; txm.count = 0; }
+
+static void txmStart(uint32_t freqHz) {
+  txmReset();
+  txm.assembling = true;
+  txm.freqHz = freqHz ? freqHz : 38000;
+  UART.printf("[TXM] iniciada a %lu Hz. Envie linhas com numeros separados por virgula. Termine com END.\n",
+              (unsigned long)txm.freqHz);
+}
+
+static void txmAddLine(char* line) {
+  // aceita "123,456, 789 , 100" ...
+  for (char* tok = strtok(line, ","); tok && txm.count < MAX_PATTERN_COUNT; tok = strtok(nullptr, ",")) {
+    while (*tok && isspace((unsigned char)*tok)) tok++;
+    if (!*tok) continue;
+    uint32_t us = strtoul(tok, nullptr, 10);
+    if (us == 0) { UART.println(F("[TXM] ignorado valor <= 0")); continue; }
+    txm.raw[txm.count++] = (uint16_t)us;
+  }
+  if (txm.count >= MAX_PATTERN_COUNT) UART.println(F("[TXM] atingiu MAX_PATTERN_COUNT; truncado."));
+}
+
+static void txmFinish() {
+  if (!txm.assembling) { UART.println(F("[TXM] nao estava ativo.")); return; }
+  UART.printf("[TXM] finalizando. total=%u slices\n", txm.count);
+  sendRawUs(txm.freqHz, txm.raw, txm.count);
+  txmReset();
+}
+
+// ================= Parser ASCII ==========================
 static void handleAsciiLine(char* line) {
   trim(line);
   if (!*line) return;
 
-  // tokenização simples
+  // Se estamos em modo TXM, interpretamos primeiro
+  if (txm.assembling) {
+    if (strcasecmp(line, "END") == 0) { txmFinish(); return; }
+    // linha de conteúdo
+    txmAddLine(line);
+    return;
+  }
+
+  // tokenização padrão
   char* argv[40] = {0};
   int argc = 0;
-  for (char* p = strtok(line, " "); p && argc < 40; p = strtok(nullptr, " ")) {
-    argv[argc++] = p;
-  }
+  for (char* p = strtok(line, " "); p && argc < 40; p = strtok(nullptr, " ")) argv[argc++] = p;
   if (argc == 0) return;
 
   if (strcasecmp(argv[0], "NEC") == 0) {
     if (argc < 2) { UART.println(F("[ERR] use: NEC <HEX8>")); return; }
-    doNEC(argv[1]);
+    doNEC(argv[1]); return;
+  }
+
+  if (strcasecmp(argv[0], "TXM") == 0) {
+    if (argc < 2) { UART.println(F("[ERR] use: TXM <freqHz>")); return; }
+    uint32_t f = strtoul(argv[1], nullptr, 10);
+    if (!f) { UART.println(F("[ERR] freqHz invalida")); return; }
+    txmStart(f);
     return;
   }
 
   if (strcasecmp(argv[0], "TX") == 0 || strcasecmp(argv[0], "TRANSMIT") == 0) {
     if (argc < 3) { UART.println(F("[ERR] use: TX <freqHz> <us,us,...>")); return; }
-    // argv[2] pode conter vírgulas; reconstitui o resto da linha original após o freq
-    char* listStart = strstr(line, argv[2]); // já está tokenizado; “line” foi modificado, mas argv[2] persiste
-    doTX(argv[1], listStart);
-    return;
+    char* listStart = strstr(line, argv[2]); // linha já tokenizada
+    doTX(argv[1], listStart); return;
   }
 
-  if (strcasecmp(argv[0], "RAW") == 0) {
-    doRAW(argc, argv);
-    return;
-  }
+  if (strcasecmp(argv[0], "RAW") == 0) { doRAW(argc, argv); return; }
+  if (strcasecmp(argv[0], "HELP") == 0 || strcasecmp(argv[0], "?") == 0) { help(); return; }
 
-  if (strcasecmp(argv[0], "HELP") == 0 || strcasecmp(argv[0], "?") == 0) {
-    help();
-    return;
-  }
-
-  UART.println(F("[ERR] comandos: NEC <hex8>, TX <freq> <us,...>, RAW <b b b>, HELP"));
+  UART.println(F("[ERR] comandos: NEC <hex8>, TX <freq> <us,...>, TXM <freq> ... END, RAW <b b b>, HELP"));
 }
 
-// ====== Setup/Loop ======
+// ========= Conversão do decode p/ TXM =====================
+#ifndef MICROS_PER_TICK
+#define MICROS_PER_TICK 50  // IRremote usa 50us/tick no buffer cru
+#endif
+
+// Mapeia protocolo → frequência típica (fallback para 38 kHz).
+static uint32_t defaultFreqForProtocol(decode_type_t p) {
+  switch (p) {
+    case RC5:
+    case RC6:        return 36000;
+    case SONY:       return 40000;
+    case PANASONIC:
+    case KASEIKYO:   return 37000;
+    default:         return 38000;
+  }
+}
+
+// Imprime como bloco TXM:
+// TXM <freq>
+// a,b,c,... (quebrando em linhas de ~80 colunas)
+// END
+static void printTXMFromLastDecode() {
+  const IRData* d = &IrReceiver.decodedIRData;
+  if (!d || !d->rawDataPtr || d->rawDataPtr->rawlen < 2) {
+    UART.println(F("[WARN] decode vazio"));
+    return;
+  }
+
+  uint32_t freq = defaultFreqForProtocol(d->protocol);
+  if (!freq) freq = lastFreqHz;
+
+  UART.printf("TXM %lu\n", (unsigned long)freq);
+
+  // Monta e imprime em linhas
+  // Índice 0 costuma ser lead; começamos no 1
+  // Reservamos ~80 colunas por linha para legibilidade
+  const uint_fast8_t rawlen = d->rawDataPtr->rawlen;
+  char line[96];
+  size_t pos = 0;
+
+  for (uint_fast8_t i = 1; i < rawlen; i++) {
+    uint32_t us = (uint32_t)d->rawDataPtr->rawbuf[i] * MICROS_PER_TICK;
+    char num[16];
+    snprintf(num, sizeof(num), "%lu", (unsigned long)us);
+
+    size_t need = strlen(num) + 1; // com possível vírgula
+    if (pos + need >= sizeof(line)) {
+      // imprime linha acumulada (sem trailing vírgula)
+      if (pos > 0 && line[pos-1] == ',') line[pos-1] = 0;
+      UART.println(line);
+      pos = 0;
+    }
+
+    // adiciona número + vírgula
+    size_t nlen = strlen(num);
+    memcpy(line + pos, num, nlen); pos += nlen;
+    if (i + 1 < rawlen) { line[pos++] = ','; }
+    line[pos] = 0;
+  }
+
+  if (pos > 0) {
+    if (line[pos-1] == ',') line[pos-1] = 0;
+    UART.println(line);
+  }
+
+  UART.println("END");
+}
+
+// ======================= Tasks (2 núcleos) =================
+static void TaskSerialAndTX(void* pv) {
+  for (;;) {
+    while (UART.available()) {
+      int c = UART.read();
+      if (c == '\r') continue;
+      if (c == '\n') {
+        asciiBuf[(asciiLen < sizeof(asciiBuf)-1) ? asciiLen : sizeof(asciiBuf)-1] = 0;
+        handleAsciiLine(asciiBuf);
+        asciiLen = 0;
+      } else if (asciiLen < sizeof(asciiBuf) - 1) {
+        asciiBuf[asciiLen++] = (char)c;
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
+static void TaskIRRecv(void* pv) {
+  for (;;) {
+    if (IrReceiver.decode()) {
+      // imprime sempre em formato TXM
+      printTXMFromLastDecode();
+
+      // Atualiza RX curto para display (apenas cabeçalho)
+      lastRxShort = "TXM recebido";
+      showStatus(lastTxShort, lastRxShort);
+
+      IrReceiver.resume(); // próximo pacote
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+}
+
+// ======================= Setup / Loop =====================
 void setup() {
   UART.begin(BAUD);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+
+  if (!oled.begin(OLED_ADDR)) {
     UART.println(F("[WARN] SSD1306 nao inicializou. Seguindo sem display."));
-  } else {
-    show3("IR ASCII v1.0", "Aguardando cmd", "");
   }
+  dispMutex = xSemaphoreCreateMutex();
+  showStatus(lastTxShort, lastRxShort);
+
   IrSender.begin(IR_SEND_PIN, ENABLE_LED_FEEDBACK, USE_DEFAULT_FEEDBACK_LED_PIN);
+  IrReceiver.begin(IR_RECV_PIN, ENABLE_LED_FEEDBACK, USE_DEFAULT_FEEDBACK_LED_PIN);
+
   UART.println(F("[IR] pronto. Digite HELP."));
+  UART.printf("[INFO] Sender pin=%d, Receiver pin=%d\n", IR_SEND_PIN, IR_RECV_PIN);
+
+  xTaskCreatePinnedToCore(TaskSerialAndTX, "serial_tx", 4096, nullptr, 1, nullptr, 1); // core 1
+  xTaskCreatePinnedToCore(TaskIRRecv,      "ir_recv",   4096, nullptr, 2, nullptr, 0); // core 0
 }
 
 void loop() {
-  while (UART.available()) {
-    int c = UART.read();
-    if (c == '\r') continue;
-    if (c == '\n') {
-      asciiBuf[(asciiLen < sizeof(asciiBuf)-1) ? asciiLen : sizeof(asciiBuf)-1] = 0;
-      handleAsciiLine(asciiBuf);
-      asciiLen = 0;
-    } else if (asciiLen < sizeof(asciiBuf) - 1) {
-      asciiBuf[asciiLen++] = (char)c;
-    }
-  }
+  vTaskDelay(pdMS_TO_TICKS(100));
 }

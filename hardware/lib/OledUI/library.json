@@ -1,0 +1,7 @@
+{
+  "name": "OledUI",
+  "version": "1.0.0",
+  "frameworks": "arduino",
+  "platforms": "*",
+  "build": { "srcDir": "src" }
+}
