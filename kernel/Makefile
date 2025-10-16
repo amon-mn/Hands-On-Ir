@@ -1,6 +1,6 @@
 # Define os arquivos que compõem o módulo.
 # No seu caso, o arquivo é smartlamp.c, então o objeto é smartlamp.o.
-obj-m += ir_sysfs_driver.o
+obj-m += ir_emitter.o
 
 # Obtém a versão do kernel em execução no seu sistema.
 # Ex: 5.15.0-86-generic
