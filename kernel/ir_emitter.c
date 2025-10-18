@@ -31,7 +31,8 @@ static ssize_t attr_show(struct kobject *sys_obj, struct kobj_attribute *attr, c
 static ssize_t attr_store(struct kobject *sys_obj, struct kobj_attribute *attr, const char *buff, size_t count);
 static void run_test_tx(void);
 static void run_test_nec(void);
-static void run_all_tests(void);
+static void cleanup_ir(char *buff);
+
 
 // Variáveis de estado
 static char recv_line[MAX_RECV_LINE];
@@ -56,6 +57,10 @@ static char test_command_tx[] = "38000 9000,4500,560,560,560,1690,560,560,560,56
 // NOVO: String de teste NEC (exemplo de NEC 32 bits)
 static char test_command_nec[] = "NEC 10C8E11E";
 
+
+static void cleanup_ir(char *buf) {
+    kfree(buf);
+}
 // Função para configurar os parâmetros seriais do CP2102 via Control-Messages
 static int ir_config_serial(struct usb_device *dev)
 {
@@ -125,14 +130,6 @@ static void run_test_nec(void) {
         printk(KERN_ERR "--- TESTE NEC USB FALHA! (Retorno: %d) ---\n", ret);
     }
     printk(KERN_INFO "--- TESTE NEC USB FINALIZADO ---\n");
-}
-
-// Função unificada para rodar todos os testes
-static void run_all_tests(void) {
-    run_test_tx();
-    // Adicione um pequeno delay entre os testes para o ESP32 se recuperar
-    msleep(200);
-    run_test_nec();
 }
 
 // =========================================================
@@ -234,8 +231,11 @@ static int usb_send_cmd_ir(char *full_command) {
     char final_command[MAX_RECV_LINE] = {0};
     char *expected_ok_prefix;
     char *start_ptr, *newline_ptr;
+    
+    // 1. Aloca o buffer de resposta
     char *full_response = kmalloc(MAX_RECV_LINE, GFP_KERNEL);
-    if (!full_response) return -ENOMEM;
+    if (!full_response) 
+        return -ENOMEM; // Sai cedo, nada para limpar
 
     memset(full_response, 0, MAX_RECV_LINE);
     memset(recv_line, 0, MAX_RECV_LINE);
@@ -258,7 +258,8 @@ static int usb_send_cmd_ir(char *full_command) {
                        usb_out_buffer, strlen(usb_out_buffer), &actual_size, 1000);
     if (ret) {
         printk(KERN_ERR "IR_EMITTER: Falha ao enviar comando! Código %d\n", ret);
-        goto cleanup;
+        cleanup_ir(full_response); // <--- MUDANÇA 1: Usando a função cleanup
+        return ret;
     }
 
     // Pequena pausa para o ESP32 processar
@@ -276,7 +277,8 @@ static int usb_send_cmd_ir(char *full_command) {
             continue;
         } else if (ret) {
             printk(KERN_ERR "IR_EMITTER: Erro de leitura USB (%d). Código: %d\n", attempts, ret);
-            goto cleanup;
+            cleanup_ir(full_response); // <--- MUDANÇA 2: Corrigindo seu código (faltava ';')
+            return ret;
         }
 
         usb_in_buffer[actual_size] = '\0';
@@ -300,11 +302,13 @@ static int usb_send_cmd_ir(char *full_command) {
                 printk(KERN_INFO "IR_EMITTER: Comando executado com sucesso.\n");
                 snprintf(last_ir_command, MAX_RECV_LINE, "%s", full_command);
                 ret = 1;
-                goto cleanup;
+                cleanup_ir(full_response); // <--- MUDANÇA 3: Usando a função cleanup
+                return ret;
             } else {
                 printk(KERN_ERR "IR_EMITTER: Firmware retornou erro: %s\n", start_ptr);
                 ret = -EIO;
-                goto cleanup;
+                cleanup_ir(full_response); // <--- MUDANÇA 4: Usando a função cleanup
+                return ret;
             }
         }
     }
@@ -312,8 +316,7 @@ static int usb_send_cmd_ir(char *full_command) {
     printk(KERN_WARNING "IR_EMITTER: Nenhuma resposta recebida (timeout após várias tentativas).\n");
     ret = 0; // considera como sucesso silencioso, apenas sem confirmação
 
-cleanup:
-    kfree(full_response);
+    cleanup_ir(full_response); // <--- MUDANÇA 5: Removido o 'cleanup:' e usando a função
     return ret;
 }
 
