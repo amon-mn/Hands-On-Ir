@@ -7,24 +7,33 @@
 #include <string.h>     // strtok, strlen
 
 // ====== Hardware & Display ======
-#define IR_SEND_PIN     4
+#define IR_SEND_PIN     2
+#define IR_RECV_PIN     14 
 #define SCREEN_WIDTH    128
 #define SCREEN_HEIGHT   32
 #define OLED_ADDR       0x3C
 
 #define UART            Serial
 #define BAUD            115200
-
+ 
 // ====== Limites de segurança ======
 static const uint32_t MAX_XMIT_TIME_US   = 2000000UL;  // 2 s
 static const uint16_t MAX_PATTERN_COUNT  = 256;
 
 // ====== Estado / buffers ======
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
-static char asciiBuf[256];
+static char asciiBuf[512];
 static uint16_t asciiLen = 0;
 static uint16_t packetCount = 0;
 static uint32_t lastFreqHz = 38000;
+
+#ifndef MICROS_PER_TICK
+  #define MICROS_PER_TICK 50
+#endif
+
+// Guarda o último comando recebido em formato REC ...
+static char lastRecLine[512];
+static bool hasLastRec = false;
 
 // ====== Helpers ======
 static inline void show3(const String& l1, const String& l2 = "", const String& l3 = "") {
@@ -137,6 +146,62 @@ static void doRAW(int argc, char** argv) {
   UART.printf("[OK] RAW n=%u\n", n);
 }
 
+void doREC() {
+  if (!IrReceiver.decode()) return;
+
+  // Use last used transmit frequency as fallback for display and REC output.
+  uint32_t freq = lastFreqHz;  // Hz (fallback)
+
+  // === RAW buffer (ticks -> microsegundos) ===
+  IRRawlenType rawCount = IrReceiver.decodedIRData.rawlen;
+  const IRRawbufType* buf = IrReceiver.decodedIRData.rawDataPtr->rawbuf;
+
+  // Quick diagnostic
+  UART.print(F("[DBG] rawlen=")); UART.println((unsigned long)rawCount);
+
+  if (rawCount == 0) {
+    IrReceiver.resume();
+    return;
+  }
+
+  // Monta a linha no formato: REC <freq> 9000,4500,560,560,...
+  int n = snprintf(lastRecLine, sizeof(lastRecLine), "REC %lu ", (unsigned long)freq);
+
+  // Começa em i = 1 para pular o primeiro elemento (gap/lixo)
+  for (IRRawlenType i = 1; i < rawCount && n < (int)sizeof(lastRecLine) - 1; i++) {
+    uint32_t us = (uint32_t)buf[i] * (uint32_t)MICROS_PER_TICK;
+
+    // ignore zero entries
+    if (us == 0) continue;
+
+    int wrote = snprintf(lastRecLine + n, sizeof(lastRecLine) - n,
+                         (i + 1 < rawCount) ? "%lu," : "%lu",
+                         (unsigned long)us);
+    if (wrote < 0 || wrote >= (int)(sizeof(lastRecLine) - n)) break;
+    n += wrote;
+  }
+
+  hasLastRec = true;
+  packetCount++;
+
+  // Feedback no display
+  char fbuf[30]; snprintf(fbuf, sizeof(fbuf), "f=%lu", (unsigned long)freq);
+  char cbuf[30]; snprintf(cbuf, sizeof(cbuf), "n=%u", (unsigned int)((rawCount > 0) ? (rawCount - 1) : 0));
+  show3("RECEBIDO", fbuf, cbuf);
+
+  UART.println(F("[OK] REC armazenado. Use LAST_REC para ver."));
+
+  IrReceiver.resume();
+}
+
+void doPrintLastReceived() {
+  if (!hasLastRec) {
+    UART.println(F("[ERR] nenhum REC armazenado ainda"));
+    return;
+  }
+  UART.println(lastRecLine);
+}
+
 // ====== Parser de linha ASCII ======
 static void handleAsciiLine(char* line) {
   trim(line);
@@ -155,15 +220,16 @@ static void handleAsciiLine(char* line) {
     doNEC(argv[1]);
     return;
   }
-
+  
   if (strcasecmp(argv[0], "TX") == 0 || strcasecmp(argv[0], "TRANSMIT") == 0) {
-    if (argc < 3) { UART.println(F("[ERR] use: TX <freqHz> <us,us,...>")); return; }
-    // argv[2] pode conter vírgulas; reconstitui o resto da linha original após o freq
-    char* listStart = strstr(line, argv[2]); // já está tokenizado; “line” foi modificado, mas argv[2] persiste
-    doTX(argv[1], listStart);
+    if (argc < 3) { 
+      UART.println(F("[ERR] use: TX <freqHz> <us,us,...>")); 
+      return; 
+    }
+    doTX(argv[1], argv[2]);
     return;
   }
-
+  
   if (strcasecmp(argv[0], "RAW") == 0) {
     doRAW(argc, argv);
     return;
@@ -171,6 +237,10 @@ static void handleAsciiLine(char* line) {
 
   if (strcasecmp(argv[0], "HELP") == 0 || strcasecmp(argv[0], "?") == 0) {
     help();
+    return;
+  }
+  if (strcasecmp(argv[0], "LAST_RECV") == 0 || strcasecmp(argv[0], "?") == 0) {
+    doPrintLastReceived();
     return;
   }
 
@@ -186,10 +256,12 @@ void setup() {
     show3("IR ASCII v1.0", "Aguardando cmd", "");
   }
   IrSender.begin(IR_SEND_PIN, ENABLE_LED_FEEDBACK, USE_DEFAULT_FEEDBACK_LED_PIN);
+  IrReceiver.begin(IR_RECV_PIN, ENABLE_LED_FEEDBACK, USE_DEFAULT_FEEDBACK_LED_PIN);
   UART.println(F("[IR] pronto. Digite HELP."));
 }
 
 void loop() {
+  doREC();
   while (UART.available()) {
     int c = UART.read();
     if (c == '\r') continue;
