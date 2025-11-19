@@ -268,7 +268,7 @@ static int usb_send_cmd_ir(char *full_command) {
 // Função Específica para buscar dados (Receive) com lógica de Acumulação
 static int usb_request_last_recv(void) {
     int ret, actual_size;
-    int attempts = 100; 
+    int attempts = 20; 
     char *line_start;
     char *line_end;
     
