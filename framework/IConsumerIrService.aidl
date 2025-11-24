@@ -16,6 +16,8 @@
 
 package android.hardware;
 
+import android.hardware.IConsumerIrLearnCallback;
+
 /** {@hide} */
 interface IConsumerIrService
 {
@@ -26,9 +28,21 @@ interface IConsumerIrService
     void transmit(String packageName, int carrierFrequency, in int[] pattern);
 
     @EnforcePermission("TRANSMIT_IR")
-    int[] lastReceive();
-
-    @EnforcePermission("TRANSMIT_IR")
     int[] getCarrierFrequencies();
+
+    // --------- NOVO: API de aprendizado / recepção ---------
+
+    /**
+     * Inicia o processo de aprendizado de um comando IR.
+     * O serviço irá enviar eventos para o callback fornecido.
+     */
+    @EnforcePermission("TRANSMIT_IR")
+    void startLearning(String packageName, IConsumerIrLearnCallback callback);
+
+    /**
+     * Pede para parar o processo de aprendizado.
+     */
+    @EnforcePermission("TRANSMIT_IR")
+    void stopLearning(String packageName);
 }
 

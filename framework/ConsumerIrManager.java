@@ -25,6 +25,11 @@ import android.os.ServiceManager;
 import android.os.ServiceManager.ServiceNotFoundException;
 import android.util.Log;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
+
+import java.util.concurrent.Executor;
+import java.util.Objects;
 /**
  * Class that operates consumer infrared on the device.
  */
@@ -86,23 +91,6 @@ public final class ConsumerIrManager {
             throw e.rethrowFromSystemServer();
         }
     }
-    // ******************************************//
-    // ********* Receiver Ading Code ************//
-    // ******************************************//
-    public int[] lastReceive() {
-        if (mService == null) {
-            Log.w(TAG, "failed to transmit; no consumer ir service.");
-            return;
-        }
-        try {
-            return mService.lastReceive();
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        }
-
-    }
-    // ******************************************//
-    
 
     /**
      * Represents a range of carrier frequencies (inclusive) on which the
@@ -164,6 +152,77 @@ public final class ConsumerIrManager {
                 range[i / 2] = new CarrierFrequencyRange(freqs[i], freqs[i+1]);
             }
             return range;
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+
+    // --------- NOVO: API de aprendizado / recepção ---------
+
+    /**
+     * @hide Callback de aprendizado de IR exposto para o app.
+     */
+    public abstract static class LearnCallback {
+        /**
+         * Chamado quando um comando IR é aprendido com sucesso.
+         */
+        public void onLearned(int carrierFrequencyHz, @Nullable int[] rawPattern, long timestampMillis) {}
+
+        /**
+         * Chamado quando ocorre um erro durante o aprendizado.
+         */
+        public void onError(int errorCode, @Nullable String message) {}
+    }
+
+    /**
+     * @hide Inicia o aprendizado de um comando de infravermelho.
+     * 
+     * @param executor Executor onde o callback será chamado.
+     * @param callback Callback do app.
+     */
+    public void startLearning(@NonNull Executor executor, @NonNull LearnCallback callback) {
+        Objects.requireNonNull(executor, "executor must not be null");
+        Objects.requireNonNull(callback, "callback must not be null");
+
+        if (mService == null) {
+            Log.w(TAG, "cannot startLearning; no consumer ir service.");
+            executor.execute(() ->
+                    callback.onError(-1, "ConsumerIrService not available"));
+            return;
+        }
+
+        IConsumerIrLearnCallback binderCallback = new IConsumerIrLearnCallback.Stub() {
+            @Override
+            public void onLearned(int carrierFrequencyHz, @Nullable int[] rawPattern, long timestampMillis) {
+                executor.execute(() ->
+                        callback.onLearned(carrierFrequencyHz, rawPattern, timestampMillis));
+            }
+
+            @Override
+            public void onError(int errorCode, @Nullable String message) {
+                executor.execute(() ->
+                        callback.onError(errorCode, message));
+            }
+        };
+
+        try {
+            mService.startLearning(mPackageName, binderCallback);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * @hide Pede para parar o processo de aprendizado, se ativo.
+     */
+    public void stopLearning() {
+        if (mService == null) {
+            Log.w(TAG, "cannot stopLearning; no consumer ir service.");
+            return;
+        }
+        try {
+            mService.stopLearning(mPackageName);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }

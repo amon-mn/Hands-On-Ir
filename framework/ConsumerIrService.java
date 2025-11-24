@@ -23,13 +23,18 @@ import android.annotation.RequiresNoPermission;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.hardware.IConsumerIrService;
+import android.hardware.IConsumerIrLearnCallback;
 import android.hardware.ir.ConsumerIrFreqRange;
-import android.hardware.ir.ConsumerIrCapture;
 import android.hardware.ir.IConsumerIr;
+import android.hardware.ir.IConsumerIrCallback;
+import android.hardware.ir.IrEvent;
 import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.util.Slog;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class ConsumerIrService extends IConsumerIrService.Stub {
     private static final String TAG = "ConsumerIrService";
@@ -37,7 +42,7 @@ public class ConsumerIrService extends IConsumerIrService.Stub {
     private static final int MAX_XMIT_TIME = 2000000; /* in microseconds */
 
     private static native boolean getHidlHalService();
-    private static native int halTransmit(int carrierFrequency, int[] pattern);
+    private static native int halTransmit(int carrierFrequency, int[] rawPattern);
     private static native int[] halGetCarrierFrequencies();
 
     private final Context mContext;
@@ -45,6 +50,21 @@ public class ConsumerIrService extends IConsumerIrService.Stub {
     private final boolean mHasNativeHal;
     private final Object mHalLock = new Object();
     private IConsumerIr mAidlService = null;
+
+    // ---------- NOVO: estado de aprendizado (recepção) ----------
+    private final Object mLearnLock = new Object();
+    private IConsumerIrLearnCallback mLearnCallback = null;
+    private final ExecutorService mLearnExecutor =
+            Executors.newSingleThreadExecutor();
+
+    // Callback da HAL (AIDL) para o framework
+    private final IConsumerIrCallback mHalCallback = new IConsumerIrCallback.Stub() {
+        @Override
+        public void onIrEvent(IrEvent event) {
+            handleIrEvent(event);
+        }
+    };
+    // ------------------------------------------------------------
 
     ConsumerIrService(Context context) {
         mContext = context;
@@ -76,11 +96,16 @@ public class ConsumerIrService extends IConsumerIrService.Stub {
         mAidlService = IConsumerIr.Stub.asInterface(
                         ServiceManager.waitForDeclaredService(fqName));
         if (mAidlService != null) {
+            Slog.i(TAG, "Using AIDL ConsumerIr HAL");
             return true;
         }
 
         // Fall back to the HIDL HAL service
-        return getHidlHalService();
+        boolean hasHidl = getHidlHalService();
+        if (hasHidl) {
+            Slog.i(TAG, "Using HIDL ConsumerIr HAL");
+        }
+        return hasHidl;
     }
 
     private void throwIfNoIrEmitter() {
@@ -89,6 +114,9 @@ public class ConsumerIrService extends IConsumerIrService.Stub {
         }
     }
 
+    // ============================================================
+    // TRANSMISSÃO (TX) - CÓDIGO ORIGINAL
+    // ============================================================
 
     @Override
     @EnforcePermission(TRANSMIT_IR)
@@ -157,45 +185,96 @@ public class ConsumerIrService extends IConsumerIrService.Stub {
         }
     }
 
+    // ============================================================
+    // NOVO: RECEPÇÃO / APRENDIZADO (RX)
+    // ============================================================
+
     @Override
     @EnforcePermission(TRANSMIT_IR)
-    public int[] lastReceive() {
-        // Enforce gerado pelo AIDL para este método
-        super.lastReceive_enforcePermission();
+    public void startLearning(String packageName, IConsumerIrLearnCallback callback) {
+        super.startLearning_enforcePermission();
 
         throwIfNoIrEmitter();
 
+        synchronized (mLearnLock) {
+            if (mLearnCallback != null) {
+                Slog.w(TAG, "startLearning: already in progress");
+                return;
+            }
+            mLearnCallback = callback;
+        }
+
         synchronized (mHalLock) {
             if (mAidlService == null) {
-                return null;
+                Slog.e(TAG, "startLearning: AIDL HAL not available (HIDL não suporta RX)");
+                synchronized (mLearnLock) {
+                    mLearnCallback = null;
+                }
+                return;
             }
 
             try {
-                ConsumerIrCapture output = mAidlService.lastReceive();
-
-                if (output == null ||
-                        output.frequencyHz <= 0 ||
-                        output.patternMicros == null ||
-                        output.patternMicros.length == 0) {
-                    Slog.e(TAG, "Error getting received signal.");
-                    return null;
-                }
-
-                Slog.i(TAG, "Signal Capture Frequency: " + output.frequencyHz);
-
-                // [0] = frequência, [1..N] = padrão em microssegundos
-                int[] result = new int[output.patternMicros.length + 1];
-                result[0] = output.frequencyHz;
-                for (int i = 0; i < output.patternMicros.length; i++) {
-                    result[i + 1] = output.patternMicros[i];
-                }
-                return result;
-
+                Slog.i(TAG, "Calling HAL startReceive()");
+                mAidlService.startReceive(mHalCallback);
             } catch (RemoteException e) {
-                Slog.e(TAG, "RemoteException while getting lastReceive()", e);
-                return null;
+                Slog.e(TAG, "Error starting learning on HAL", e);
+                synchronized (mLearnLock) {
+                    mLearnCallback = null;
+                }
             }
         }
     }
 
+    @Override
+    @EnforcePermission(TRANSMIT_IR)
+    public void stopLearning(String packageName) {
+        super.stopLearning_enforcePermission();
+
+        throwIfNoIrEmitter();
+
+        synchronized (mLearnLock) {
+            mLearnCallback = null;
+        }
+
+        synchronized (mHalLock) {
+            if (mAidlService == null) {
+                // HIDL não tem suporte a RX, então nada a fazer
+                return;
+            }
+            try {
+                Slog.i(TAG, "Calling HAL stopReceive()");
+                mAidlService.stopReceive();
+            } catch (RemoteException e) {
+                Slog.e(TAG, "Error stopping learning on HAL", e);
+            }
+        }
+    }
+
+    /**
+     * Chamado pelo callback da HAL (mHalCallback) quando um IrEvent é recebido.
+     * Aqui traduzimos o evento da HAL para o callback de framework/app.
+     */
+    private void handleIrEvent(IrEvent event) {
+        final IConsumerIrLearnCallback callback;
+
+        synchronized (mLearnLock) {
+            if (mLearnCallback == null) {
+                Slog.w(TAG, "handleIrEvent: no learn callback registered; dropping event");
+                return;
+            }
+            callback = mLearnCallback;
+        }
+
+        mLearnExecutor.execute(() -> {
+            try {
+                callback.onLearned(
+                        event.carrierFrequencyHz,
+                        event.rawPattern,
+                        event.timestampNanos / 1000000L
+                );
+            } catch (RemoteException e) {
+                Slog.e(TAG, "App learn callback failed", e);
+            }
+        });
+    }
 }

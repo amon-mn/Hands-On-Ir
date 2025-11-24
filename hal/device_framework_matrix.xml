@@ -1,0 +1,23 @@
+<compatibility-matrix version="1.0" type="framework">
+    <!-- SmartLamp (já existia) -->
+    <hal format="aidl" optional="true">
+        <name>devtitans.smartlamp</name>
+        <version>1</version>
+        <interface>
+            <name>ISmartlamp</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+
+    <!-- IR AIDL V2 ( atualizado ) -->
+    <hal format="aidl" optional="true">
+        <name>android.hardware.ir</name>
+        <version>2</version>
+        <interface>
+            <name>IConsumerIr</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+</compatibility-matrix>

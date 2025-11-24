@@ -1,0 +1,13 @@
+on early-init
+    export DEV_TITANS "DevTITANS Kraken! v1.0"
+
+on property:dev.bootcomplete=1
+    exec /system/bin/log -p d -t "DevTITANS" "DevTITANS Kraken! inicializado."
+
+on boot
+    chown system system /sys/kernel/infrared/transmit
+    chmod 0660 /sys/kernel/infrared/transmit
+
+    wait /sys/kernel/infrared/receive
+    chown system system /sys/kernel/infrared/receive
+    chmod 0440 /sys/kernel/infrared/receive
