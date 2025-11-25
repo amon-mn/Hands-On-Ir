@@ -1,4 +1,4 @@
-// hardware/interfaces/ir/aidl/default/main.cpp
+// aosp/hardware/interfaces/ir/aidl/default
 
 /*
  * Copyright (C) 2021 The Android Open Source Project

@@ -1,3 +1,5 @@
+<!-- aosp/device/devtitans/kraken -->
+
 <compatibility-matrix version="1.0" type="framework">
     <!-- SmartLamp (já existia) -->
     <hal format="aidl" optional="true">

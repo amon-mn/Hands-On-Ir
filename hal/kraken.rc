@@ -1,3 +1,5 @@
+# aosp/device/devtitans/kraken
+
 on early-init
     export DEV_TITANS "DevTITANS Kraken! v1.0"
 

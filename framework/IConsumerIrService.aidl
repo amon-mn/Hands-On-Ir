@@ -1,3 +1,5 @@
+// aosp/frameworks/base/core/java/android/hardware$
+
 /**
  * Copyright (c) 2013, The Android Open Source Project
  *
