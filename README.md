@@ -99,12 +99,7 @@ Ferramenta de Gestão: acompanhe o nosso progresso no **[Github Projects](https:
 ### Aplicação
 - **Android Studio**
 
----
 
-## Instruções de Instalação e Uso
-As instruções detalhadas de como compilar e instalar cada componente serão adicionadas aqui nas próximas sprints.  
-
-➡️ **A Sprint 0 está focada no planejamento e na configuração.**
 
 
 
